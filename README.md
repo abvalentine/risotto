@@ -2,5 +2,5 @@ risotto
 =======
 Some tools for Django
 
-== checkdb.py ==
+## checkdb.py
 Compares database schema with django models
