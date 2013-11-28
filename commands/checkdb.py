@@ -20,7 +20,7 @@ MYSQL_SETTINGS = {
         'smallint': 'smallint',
         'double precision': 'double',
     },
-    TYPES_REQUEST: "select column_name, column_type from INFORMATION_SCHEMA.COLUMNS where table_name = '%s'",
+    TYPES_REQUEST: "select column_name, column_type, is_nullable from INFORMATION_SCHEMA.COLUMNS where table_name = '%s'",
 }
 
 POSTGRESQL_SETTINGS = {
@@ -36,7 +36,7 @@ POSTGRESQL_SETTINGS = {
         'double precision': 'double precision',
         'numeric': 'numeric',
     },
-    TYPES_REQUEST: "select column_name, data_type from INFORMATION_SCHEMA.COLUMNS where table_name = '%s'",
+    TYPES_REQUEST: "select column_name, data_type, is_nullable from INFORMATION_SCHEMA.COLUMNS where table_name = '%s'",
 }
 
 varchar_exp = re.compile(r'varchar\((\d+)\)')
@@ -52,6 +52,19 @@ def pretty_name(model):
 
 def pretty_list(lst):
     return ', '.join([item for item in sorted(lst)])
+    
+class InvalidDatabaseResponseException(Exception):
+    pass
+    
+def boolToYesNo(value):
+    return 'YES' if value else 'NO'
+
+def yesNoToBool(value):
+    if value == 'YES':
+        return True
+    if value == 'NO':
+        return False
+    raise InvalidDatabaseResponseException('Can\'t convert response "%s" to bool' % value)
 
 class Command(NoArgsCommand):
     option_list = NoArgsCommand.option_list + (
@@ -108,8 +121,10 @@ class Command(NoArgsCommand):
             table = model._meta.db_table
             columns = [field.column for field in model._meta.fields]
             types = {}
+            nullables = {}
             for field in model._meta.fields:
                 types[field.column] = field.db_type(connection=connection)
+                nullables[field.column] = field.null
                 
             # issue with inheritance
             parents = model._meta.parents
@@ -118,7 +133,7 @@ class Command(NoArgsCommand):
                     columns.remove(field.column)
                     del types[field.column]
 
-            table_info.append((table, columns, types))
+            table_info.append((table, columns, types, nullables))
             
         for model in seen_models:
             for field in model._meta.local_many_to_many:
@@ -126,12 +141,17 @@ class Command(NoArgsCommand):
                     continue
                 table = field.m2m_db_table()
                 columns = ['id'] # They always have an id column
+                types = {}
+                nullables = {}
                 types['id'] = 'integer'
+                nullables['id'] = False
                 columns.append(field.m2m_column_name())
                 columns.append(field.m2m_reverse_name())
                 types[field.m2m_column_name()] = 'integer'
                 types[field.m2m_reverse_name()] = 'integer'
-                table_info.append((table, columns, types))
+                nullables[field.m2m_column_name()] = False
+                nullables[field.m2m_reverse_name()] = False
+                table_info.append((table, columns, types, nullables))
                 
         
         out_of_sync = []
@@ -165,7 +185,7 @@ class Command(NoArgsCommand):
                             if not dbtypebase:
                                 print colorize('[ERROR] Can\'t validate DB. Unknown field type in %s.%s: %s' % (pretty_name(model), djcolname, djcoltype))
                                 exit(1)
-                            for dbcolname, dbcoltype in content:
+                            for dbcolname, dbcoltype, is_nullable in content:
                                 if dbcolname == djcolname:
                                     if dbtypebase not in dbcoltype:
                                         print colorize('[ERROR] Inconsistent field type in model \'%s\'' % pretty_name(model), bold=False)
@@ -180,6 +200,14 @@ class Command(NoArgsCommand):
                                             print ' Model field:       %s %d' % (djcolname, varchar_length)
                                             print ' Database column:   %s %d' % (dbcolname, int(m.group(1)))
                                             out_of_sync += [model]
+                                        break
+                                    dj_is_nullable = item[3][djcolname]
+                                    if dj_is_nullable != yesNoToBool(is_nullable):
+                                        print colorize('[ERROR] Inconsistent Nullable in model \'%s\'' % pretty_name(model), bold=False)
+                                        print ' Field: %s' % djcolname
+                                        print ' Model NULL: %s (%s)' % (boolToYesNo(dj_is_nullable), dj_is_nullable)
+                                        print ' Database NULL: %s (%s)' % (is_nullable, yesNoToBool(is_nullable))
+                                        out_of_sync += [model]
                                         break
                         break
                 else:
